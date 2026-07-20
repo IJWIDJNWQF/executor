@@ -1,9 +1,28 @@
--- replicatesignal replacement that actually works
--- resolves RemoteEvent from signal/instance/name then fires legitimately
+-- repsignal.luau
+-- replicatesignal replacement with retry + timeout handling
+
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+
+local function wait_for_child(parent, name, timeout)
+    timeout = timeout or 8
+    local start = tick()
+    local child = parent:FindFirstChild(name)
+    while not child and (tick() - start) < timeout do
+        child = parent:FindFirstChild(name)
+        if child then break end
+        RunService.Heartbeat:Wait()
+    end
+    return child
+end
 
 local function resolve_event(input)
-    if typeof(input) == "Instance" and (input:IsA("RemoteEvent") or input:IsA("RemoteFunction") or input:IsA("UnvalidatedRemoteEvent")) then
-        return input
+    if typeof(input) == "Instance" then
+        if input:IsA("RemoteEvent") or input:IsA("RemoteFunction") or input:IsA("UnvalidatedRemoteEvent") then
+            return input
+        end
+        return nil
     end
 
     if typeof(input) == "userdata" then
@@ -29,22 +48,42 @@ local function resolve_event(input)
     end
 
     if type(input) == "string" then
-        local rs = game:GetService("ReplicatedStorage")
-        local rf = game:GetService("ReplicatedFirst")
-        for _, svc in ipairs({rs, rf}) do
-            local found = svc:FindFirstChild(input)
-            if found and (found:IsA("RemoteEvent") or found:IsA("RemoteFunction") or found:IsA("UnvalidatedRemoteEvent")) then
-                return found
-            end
-            for _, desc in ipairs(svc:GetDescendants()) do
-                if desc.Name == input and (desc:IsA("RemoteEvent") or desc:IsA("RemoteFunction") or desc:IsA("UnvalidatedRemoteEvent")) then
-                    return desc
-                end
-            end
+        local found = wait_for_child(ReplicatedStorage, input, 8)
+        if not found then
+            found = wait_for_child(ReplicatedFirst, input, 8)
+        end
+        if found and (found:IsA("RemoteEvent") or found:IsA("RemoteFunction") or found:IsA("UnvalidatedRemoteEvent")) then
+            return found
         end
     end
 
     return nil
+end
+
+local function safe_fire(event, args)
+    if event:IsA("RemoteEvent") or event:IsA("UnvalidatedRemoteEvent") then
+        event:FireServer(unpack(args))
+    elseif event:IsA("RemoteFunction") then
+        event:InvokeServer(unpack(args))
+    else
+        error("repsignal: unsupported type " .. event.ClassName)
+    end
+end
+
+local function try_fire(event, args, retries)
+    retries = retries or 5
+    for i = 1, retries do
+        local success, err = pcall(function()
+            safe_fire(event, args)
+        end)
+        if success then
+            return true
+        end
+        if i < retries then
+            RunService.Heartbeat:Wait()
+        end
+    end
+    return false
 end
 
 local function replicatesignal(sig, ...)
@@ -54,18 +93,10 @@ local function replicatesignal(sig, ...)
     end
 
     local args = {...}
-    local success, err = pcall(function()
-        if event:IsA("RemoteEvent") or event:IsA("UnvalidatedRemoteEvent") then
-            event:FireServer(unpack(args))
-        elseif event:IsA("RemoteFunction") then
-            event:InvokeServer(unpack(args))
-        else
-            error("repsignal: unsupported type " .. event.ClassName)
-        end
-    end)
+    local success = try_fire(event, args, 5)
 
     if not success then
-        return false, err
+        return false, "repsignal: failed to fire after retries"
     end
     return true
 end
