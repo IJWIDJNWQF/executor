@@ -1,4 +1,3 @@
--- repsignal.lua
 -- replicatesignal replacement that actually works
 -- resolves RemoteEvent from signal/instance/name then fires legitimately
 
